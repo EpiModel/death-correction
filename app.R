@@ -53,25 +53,31 @@ departure_share <- function(hb, h_d) {
 # Departure rate at which the correction can no longer hold the target.
 ceiling_drate <- function(duration) 1 - sqrt(1 - 1 / duration)
 
-# Stationary simulation of an ongoing edge population. Every ended edge is
-# replaced by a fresh one, and we track the mean age of active edges each
-# step. For geometric durations the mean age of extant ties equals the
-# mean total duration, so this converges to realized_duration.
-sim_mean_age <- function(duration, h_d, corrected,
-                         nsteps = 250, n_edges = 400, reps = 5) {
+# Lightweight formation-dissolution simulation of an open-population network,
+# tracking BOTH the cross-sectional edge count and the mean age of active edges
+# over time. Formation adds a constant Poisson inflow (E_target / duration), the
+# same for both models, because netest calibrates formation to the crude
+# duration target; the correction changes only the dissolution hazard. So the
+# edge count settles at (formation inflow) x (realized duration): on target with
+# the correction, lower without it. Validated against EpiModel netsim (a stable
+# N = 500 model holds ~125 edges corrected and decays to ~86 uncorrected).
+sim_network <- function(duration, h_d, corrected,
+                        E_target = E_TARGET, nsteps = 250, reps = 5) {
   hb <- breakup_hazard(duration, h_d, corrected)
   p_end <- 1 - (1 - hb) * (1 - h_d)
-  m <- matrix(NA_real_, nsteps, reps)
+  F_rate <- E_target / duration
+  edges <- matrix(NA_real_, nsteps, reps)
+  mage  <- matrix(NA_real_, nsteps, reps)
   for (r in seq_len(reps)) {
-    ages <- rep(0, n_edges)
+    ages <- rep(0, E_target)
     for (t in seq_len(nsteps)) {
-      ended <- runif(n_edges) < p_end
-      ages[ended] <- 0
-      ages <- ages + 1
-      m[t, r] <- mean(ages)
+      ages <- ages[runif(length(ages)) >= p_end] + 1   # dissolve, then age survivors
+      ages <- c(ages, rep(1, rpois(1, F_rate)))         # form new edges (age 1)
+      edges[t, r] <- length(ages)
+      mage[t, r]  <- if (length(ages)) mean(ages) else NA_real_
     }
   }
-  m
+  list(edges = edges, mage = mage)
 }
 
 
@@ -80,6 +86,7 @@ col_corr   <- "#1a6b54"   # teal: with correction
 col_none   <- "#c0392b"   # red: without correction
 col_steel  <- "#4682B4"   # steel blue: departure component
 col_target <- "#333333"
+E_TARGET   <- 125         # reference cross-sectional edge count (tutorial Model 2, stable N)
 
 
 # ---- Plot and text builders (pure; tested outside Shiny) ------------
@@ -133,23 +140,35 @@ plot_hazard_decomp <- function(duration, d_rate) {
          legend = c("breakup", "departure"), text.col = "#555")
 }
 
-plot_sim <- function(sim_corr, sim_none, duration) {
+plot_sim <- function(corr, none, duration) {
   D <- duration
-  par(family = "sans", mar = c(4.5, 4.5, 2.5, 1), bg = "#ffffff")
-  matplot(sim_corr, type = "l", lty = 1, lwd = 1.5, col = adjustcolor(col_corr, 0.6),
-          ylim = c(0, D * 1.2), xlab = "Time step",
-          ylab = "Mean age of active partnerships",
-          main = "Simulated realized duration, with and without correction",
-          col.main = col_corr, font.main = 2, cex.main = 1.2,
+  par(family = "sans", mfrow = c(1, 2), mar = c(4.5, 4.5, 2.5, 1), bg = "#ffffff")
+
+  # Left: realized duration (mean age of active partnerships)
+  matplot(corr$mage, type = "l", lty = 1, lwd = 1.2, col = adjustcolor(col_corr, 0.5),
+          ylim = c(0, D * 1.2), xlab = "Time step", ylab = "Mean age of active ties",
+          main = "Realized duration", col.main = col_corr, font.main = 2, cex.main = 1.2,
           col.lab = "#555", cex.lab = 1.05, col.axis = "#777")
-  matlines(sim_none, lty = 1, lwd = 1.5, col = adjustcolor(col_none, 0.6))
-  lines(rowMeans(sim_corr), lwd = 3, col = col_corr)
-  lines(rowMeans(sim_none), lwd = 3, col = col_none)
+  matlines(none$mage, lty = 1, lwd = 1.2, col = adjustcolor(col_none, 0.5))
+  lines(rowMeans(corr$mage), lwd = 3, col = col_corr)
+  lines(rowMeans(none$mage), lwd = 3, col = col_none)
   abline(h = D, lty = 2, lwd = 2, col = col_target)
   legend("bottomright", bty = "n", lwd = c(3, 3, 2), lty = c(1, 1, 2),
          col = c(col_corr, col_none, col_target),
-         legend = c("With correction", "Without correction", paste0("Target = ", D)),
-         text.col = "#555")
+         legend = c("With correction", "Without", "Target"), text.col = "#555", cex = 0.95)
+
+  # Right: cross-sectional edge count (at stable N it follows realized duration)
+  matplot(corr$edges, type = "l", lty = 1, lwd = 1.2, col = adjustcolor(col_corr, 0.5),
+          ylim = c(0, E_TARGET * 1.25), xlab = "Time step", ylab = "Cross-sectional edges",
+          main = "Edge count (stable population)", col.main = col_corr, font.main = 2,
+          cex.main = 1.2, col.lab = "#555", cex.lab = 1.05, col.axis = "#777")
+  matlines(none$edges, lty = 1, lwd = 1.2, col = adjustcolor(col_none, 0.5))
+  lines(rowMeans(corr$edges), lwd = 3, col = col_corr)
+  lines(rowMeans(none$edges), lwd = 3, col = col_none)
+  abline(h = E_TARGET, lty = 2, lwd = 2, col = col_target)
+  legend("bottomright", bty = "n", lwd = c(3, 3, 2), lty = c(1, 1, 2),
+         col = c(col_corr, col_none, col_target),
+         legend = c("With correction", "Without", "Target"), text.col = "#555", cex = 0.95)
 }
 
 # Returns a list of recap items (character or HTML) for the results card.
@@ -171,7 +190,9 @@ recap_items <- function(duration, d_rate) {
     sprintf("With the correction, about %.0f%% of endings are departures and %.0f%% are breakups.",
             100 * departure_share(hb_c, hd), 100 * (1 - departure_share(hb_c, hd))),
     HTML(sprintf("Mean degree comes along for the ride: without the correction it sags to about %.0f%% of target; with it, it holds.",
-                 100 * dur_n / D))
+                 100 * dur_n / D)),
+    HTML(sprintf("So does the cross-sectional edge count (at a stable population): it settles near <strong>%.0f</strong> without the correction versus the %d-edge target with it.",
+                 E_TARGET * dur_n / D, E_TARGET))
   )
   if (d_rate > ceiling_drate(D)) {
     items <- c(items, list(HTML(sprintf(
@@ -273,7 +294,8 @@ ui <- fluidPage(
            just enough that the two together sum back to 1 / duration, restoring the
            duration. That is why it makes edges", strong("more"), "persistent."),
         p("Drag the", strong("departure rate"), "and watch the uncorrected duration
-           fall away from target while the corrected one holds.")
+           fall away from target while the corrected one holds, and the cross-sectional
+           edge count fall right along with it.")
       )
     )
   ),
@@ -302,7 +324,7 @@ ui <- fluidPage(
       div(class = "plot-card", plotOutput("hazard_bar", height = "340px")),
       div(class = "plot-card",
         tags$p(style = "color:#777; font-size:0.95rem; margin:0 0 0.5rem 0.25rem;",
-               "Simulation: mean age of active partnerships over time (press Run)."),
+               "Simulation: realized duration and the cross-sectional edge count over time (press Run). Shorter partnerships mean fewer are ongoing at once, so the edge count falls right along with the duration."),
         plotOutput("sim_plot", height = "380px")
       )
     )
@@ -328,8 +350,8 @@ server <- function(input, output, session) {
   sim_data <- eventReactive(input$run_sim, {
     hd <- hazard_dep(input$d_rate)
     list(D = input$duration,
-         corr = sim_mean_age(input$duration, hd, TRUE),
-         none = sim_mean_age(input$duration, hd, FALSE))
+         corr = sim_network(input$duration, hd, TRUE),
+         none = sim_network(input$duration, hd, FALSE))
   })
 
   output$sim_plot <- renderPlot({
